@@ -10,6 +10,7 @@ import streamlit as st
 
 from backend.analyzer import analyze_bytes, verify_payload
 from backend.store import Store
+from backend.workflow import pipeline_states
 
 st.set_page_config(page_title="RecoverIQ", page_icon="🔎", layout="wide", initial_sidebar_state="collapsed")
 st.markdown("""
@@ -82,7 +83,11 @@ def render_page_intro(eyebrow: str, title: str, description: str) -> None:
     )
 
 
-def render_workflow(records: list[dict[str, Any]], current_stage: int) -> None:
+def render_workflow(
+    records: list[dict[str, Any]],
+    current_stage: int,
+    selected_record: dict[str, Any] | None = None,
+) -> None:
     stages = [
         "Source file",
         "Signature detection",
@@ -93,30 +98,10 @@ def render_workflow(records: list[dict[str, Any]], current_stage: int) -> None:
         "Integrity verification",
         "Recovered file",
     ]
-    has_candidates = bool(records)
-    grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
-    for record in records:
-        if has_confirmed_upload_id(record["source_id"]):
-            grouped.setdefault((record["source_id"], record["file_type"]), []).append(record)
-    has_adjacent_ranges = any(
-        first["offset"] + first["length"] == second["offset"]
-        for fragments in grouped.values()
-        for first, second in zip(sorted(fragments, key=lambda item: item["offset"]), sorted(fragments, key=lambda item: item["offset"])[1:])
-    )
-    recovery_id = st.session_state.get("recovery_id")
-    recovery_record = store.get_recovery(recovery_id) if recovery_id else None
-    reconstruction_done = recovery_record is not None
-    states = [
-        has_candidates,
-        has_candidates,
-        has_candidates,
-        has_candidates,
-        has_adjacent_ranges,
-        reconstruction_done,
-        reconstruction_done,
-        reconstruction_done,
-    ]
-    symbols = ["1", "⌕", "▤", "⋈", "↔", "⚙", "✓", "↓"]
+    recovery_record = store.get_recovery_for_asset(selected_record["id"]) if selected_record else None
+    recovered_file_verified = bool(recovery_record and recovery_record[0]["verified"])
+    states = pipeline_states(records, selected_record, recovery_record is not None, recovered_file_verified)
+    symbols = ["1", "⌕", "▤", "⋈", "↔", "⚙", "◷", "↓"]
     tiles = []
     for index, label in enumerate(stages, start=1):
         state_class = "done" if states[index - 1] else "current" if index == current_stage else ""
@@ -251,9 +236,9 @@ def fragments_page() -> None:
 def compatibility_page() -> None:
     records = assets()
     render_page_intro("03 / MATCH BYTE RANGES", "Fragment compatibility", "Check whether candidates meet the exact source, type, and byte-adjacency rules.")
-    render_workflow(records, current_stage=5)
+    item = selected_asset(records, "compatibility_candidate")
+    render_workflow(records, current_stage=5, selected_record=item)
     section("Compatibility check", "No filename similarity, semantic match, or inferred missing bytes are used.")
-    item = selected_asset(assets(), "compatibility_candidate")
     if item is None:
         st.markdown('<div class="rqi-empty">Scan a source file to create candidate records.</div>', unsafe_allow_html=True)
         return
@@ -281,9 +266,11 @@ def compatibility_page() -> None:
 def integrity_page() -> None:
     records = assets()
     render_page_intro("04 / RECONSTRUCT & VERIFY", "Integrity and recovery", "Join only confirmed contiguous ranges, validate structure, then export the stored result.")
-    render_workflow(records, current_stage=8 if st.session_state.get("recovery_id") else 6)
-    section("Reconstruction candidate", "Format checks describe parser/decoder results; they do not establish authenticity.")
     item = selected_asset(records, "integrity_candidate")
+    recovery_for_selected = store.get_recovery_for_asset(item["id"]) if item else None
+    stage = 8 if recovery_for_selected and recovery_for_selected[0]["verified"] else 6
+    render_workflow(records, current_stage=stage, selected_record=item)
+    section("Reconstruction candidate", "Format checks describe parser/decoder results; they do not establish authenticity.")
     if item is None:
         st.markdown('<div class="rqi-empty">Scan a source file to create candidate records.</div>', unsafe_allow_html=True)
         return
@@ -343,7 +330,7 @@ def integrity_page() -> None:
 def relationships_page() -> None:
     records = assets()
     render_page_intro("05 / OBSERVED CONNECTIONS", "Byte relationships", "The diagram links only confirmed, exactly adjacent byte ranges of the same type.")
-    render_workflow(records, current_stage=5)
+    render_workflow(records, current_stage=0)
     section("Exact adjacency map", "Each edge represents a directly observed boundary match.")
     groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for item in records:

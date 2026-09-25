@@ -124,6 +124,18 @@ class Store:
         item["verified"] = bool(item["verified"])
         return item, row["payload"]
 
+    def get_recovery_for_asset(self, asset_id: str) -> tuple[dict[str, Any], bytes] | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM recoveries WHERE source_asset_id = ? ORDER BY created_at DESC LIMIT 1",
+                (asset_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        item = {key: row[key] for key in row.keys() if key != "payload"}
+        item["verified"] = bool(item["verified"])
+        return item, row["payload"]
+
     def list_assets_for_source_type(self, source_id: str, file_type: str) -> list[dict[str, Any]]:
         with self.connect() as connection:
             rows = connection.execute(
