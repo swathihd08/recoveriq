@@ -76,7 +76,7 @@ def source_records_page() -> None:
     upload_key = f"evidence_file_{st.session_state.get('upload_widget_version', 0)}"
     with st.form("evidence_upload_form", clear_on_submit=True):
         uploads = st.file_uploader("Choose files", type=None, accept_multiple_files=True, key=upload_key, help="Maximum 64 MB per file")
-        submitted = st.form_submit_button("Scan selected files", type="primary", disabled=not uploads)
+        submitted = st.form_submit_button("Scan selected files", type="primary")
     if submitted and uploads:
         for uploaded in uploads:
             payload = uploaded.getvalue()
