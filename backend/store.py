@@ -108,6 +108,27 @@ class Store:
         with self.connect() as connection:
             connection.execute("UPDATE assets SET status = ? WHERE id = ?", (status, asset_id))
 
+    def delete_upload_records(self, source_id: str) -> int:
+        """Delete candidates and their recoveries for exactly one upload identity."""
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT id FROM assets WHERE source_id = ?",
+                (source_id,),
+            ).fetchall()
+            asset_ids = [row["id"] for row in rows]
+            if not asset_ids:
+                return 0
+            placeholders = ", ".join("?" for _ in asset_ids)
+            connection.execute(
+                f"DELETE FROM recoveries WHERE source_asset_id IN ({placeholders})",
+                asset_ids,
+            )
+            connection.execute(
+                f"DELETE FROM assets WHERE id IN ({placeholders})",
+                asset_ids,
+            )
+            return len(asset_ids)
+
     def save_recovery(self, item: dict[str, Any], payload: bytes) -> None:
         with self.connect() as connection:
             connection.execute(

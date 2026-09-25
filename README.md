@@ -10,6 +10,8 @@ Streamlit-only, local-first evidence triage. The app reports observed file signa
 - **Integrity and recovery:** rebuild contiguous candidate ranges, validate their format, store a reconstruction, and download it.
 - **Byte relationships:** view a graph and table of exact adjacency links only.
 
+Previously scanned uploads can be removed from the Evidence sources page. Deletion requires confirmation and removes only records for that upload ID plus reconstructed artifacts linked to those candidate IDs; same-named uploads are kept separate. Original files on the user's device are not changed.
+
 JPEG, PNG, PDF, ZIP, and readable-text candidates are detected. JPEG/PNG decoding, strict PDF parsing, ZIP integrity checks, and text checks are used for format validation. Validation is not proof of forensic authenticity; missing bytes are never fabricated.
 
 ## Run locally

@@ -133,6 +133,21 @@ def has_confirmed_upload_id(source_id: str) -> bool:
         return False
 
 
+def source_groups(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for record in records:
+        grouped.setdefault(record["source_id"], []).append(record)
+    return [
+        {
+            "source_id": source_id,
+            "source": items[0]["source"],
+            "records": sorted(items, key=lambda item: item["offset"]),
+            "identity_confirmed": has_confirmed_upload_id(source_id),
+        }
+        for source_id, items in grouped.items()
+    ]
+
+
 def compatible_chain(asset: dict[str, Any]) -> list[dict[str, Any]]:
     if not has_confirmed_upload_id(asset["source_id"]):
         return [asset]
@@ -154,6 +169,9 @@ def compatible_chain(asset: dict[str, Any]) -> list[dict[str, Any]]:
 def source_records_page() -> None:
     records = assets()
     render_page_intro("01 / INGEST", "Evidence sources", "Scan source files locally. Original bytes remain unchanged during analysis.")
+    deletion_notice = st.session_state.pop("upload_deleted_notice", None)
+    if deletion_notice:
+        st.success(deletion_notice)
     render_workflow(records, current_stage=1 if not records else 5)
     if not records:
         st.markdown('<div class="rqi-empty"><b>Ready for source evidence</b><br>Choose a damaged file or storage image below. Nothing is added until you press Scan selected files.</div>', unsafe_allow_html=True)
@@ -187,19 +205,39 @@ def source_records_page() -> None:
         section("Stored sources")
         st.markdown('<div class="rqi-empty">No source filenames have been scanned in this app database yet.</div>', unsafe_allow_html=True)
         return
-    by_source: dict[str, list[dict[str, Any]]] = {}
-    for record in records:
-        by_source.setdefault(record["source"], []).append(record)
-    section("Stored source filenames", "Grouped by observed filename only. Matching names do not prove identical uploads.")
-    st.dataframe([
-        {
-            "Source filename": name,
-            "Candidate records": len(items),
-            "Candidate bytes": sum(item["length"] for item in items),
-            "Detected types": ", ".join(sorted({item["file_type"] for item in items})),
-        }
-        for name, items in sorted(by_source.items())
-    ], width="stretch", hide_index=True)
+    section("Stored uploads", "Delete removes candidate records and reconstructions for that upload ID only. Files with the same name stay separate.")
+    for upload in sorted(source_groups(records), key=lambda value: (value["source"].lower(), value["source_id"])):
+        candidates = upload["records"]
+        heading = f"{upload['source']} · {len(candidates)} candidate(s)"
+        with st.expander(heading):
+            st.caption(
+                f"Upload ID: {upload['source_id']}" if upload["identity_confirmed"]
+                else f"Legacy record identity: {upload['source_id']} (not confirmed as a complete upload)"
+            )
+            st.dataframe([
+                {"Candidate": item["file_name"], "Type": item["file_type"], "Offset": item["offset"], "Length (bytes)": item["length"], "SHA-256": item["sha256"]}
+                for item in candidates
+            ], width="stretch", hide_index=True)
+            pending_key = f"delete_upload_{upload['source_id']}"
+            confirm_key = f"confirm_delete_{upload['source_id']}"
+            if not st.session_state.get(pending_key, False):
+                if st.button("Delete this upload", key=f"request_{upload['source_id']}", type="secondary"):
+                    st.session_state[pending_key] = True
+                    st.rerun()
+            else:
+                st.warning(f"This permanently deletes {len(candidates)} candidate record(s) and their reconstructed artifacts from the app database. It does not delete or change the original file on your device.")
+                confirm_col, cancel_col = st.columns(2)
+                if confirm_col.button("Permanently delete", key=confirm_key, type="primary"):
+                    deleted = store.delete_upload_records(upload["source_id"])
+                    st.session_state.pop(pending_key, None)
+                    if st.session_state.get("recovery_source_id") in {item["id"] for item in candidates}:
+                        st.session_state.pop("recovery_id", None)
+                        st.session_state.pop("recovery_source_id", None)
+                    st.session_state.upload_deleted_notice = f"Deleted {deleted} candidate record(s) for {upload['source']}."
+                    st.rerun()
+                if cancel_col.button("Cancel", key=f"cancel_{upload['source_id']}"):
+                    st.session_state.pop(pending_key, None)
+                    st.rerun()
 
 
 def fragments_page() -> None:
@@ -331,43 +369,55 @@ def relationships_page() -> None:
     records = assets()
     render_page_intro("05 / OBSERVED CONNECTIONS", "Byte relationships", "The diagram links only confirmed, exactly adjacent byte ranges of the same type.")
     render_workflow(records, current_stage=0)
-    section("Exact adjacency map", "Each edge represents a directly observed boundary match.")
-    groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
-    for item in records:
-        if has_confirmed_upload_id(item["source_id"]):
-            groups.setdefault((item["source_id"], item["file_type"]), []).append(item)
+    source_options = {
+        f"{group['source']} · {group['source_id'][:8]} · {len(group['records'])} candidates": group
+        for group in source_groups(records)
+        if group["identity_confirmed"]
+    }
+    if not source_options:
+        section("Byte-range map", "Only exact byte boundaries can form an edge; filename matches do not establish a relationship.")
+        st.markdown('<div class="rqi-empty">No candidates with confirmed upload IDs are stored.</div>', unsafe_allow_html=True)
+        return
+    selected_source = st.selectbox("Choose uploaded source", list(source_options), key="relationship_upload")
+    upload_group = source_options[selected_source]
+    source_records = upload_group["records"]
+    section("Byte-range map", "Every node represents one stored candidate. Edges appear only where same-type ranges touch exactly.")
+    st.caption(f"Source filename: {upload_group['source']} · Confirmed upload ID: {upload_group['source_id']}")
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for item in source_records:
+        groups.setdefault(item["file_type"], []).append(item)
     edges: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    linked_ids: set[str] = set()
     for fragments in groups.values():
         fragments.sort(key=lambda candidate: candidate["offset"])
         for first, second in zip(fragments, fragments[1:]):
             if first["offset"] + first["length"] == second["offset"]:
                 edges.append((first, second))
+                linked_ids.update((first["id"], second["id"]))
     st.metric("Exact adjacent links", len(edges))
-    if not edges:
-        st.markdown('<div class="rqi-empty">No exact byte-adjacent fragment pairs with confirmed upload identity were observed.</div>', unsafe_allow_html=True)
-        return
     st.dataframe([
         {
-            "First candidate": first["file_name"],
-            "First range end": first["offset"] + first["length"],
-            "Next candidate": second["file_name"],
-            "Next range start": second["offset"],
-            "Source filename": first["source"],
-            "Type": first["file_type"],
+            "Candidate": item["file_name"],
+            "Type": item["file_type"],
+            "Start byte": item["offset"],
+            "End byte (exclusive)": item["offset"] + item["length"],
+            "Length": item["length"],
+            "Observed adjacency": "Has exact adjacent range" if item["id"] in linked_ids else "No exact adjacent range",
         }
-        for first, second in edges
-    ], use_container_width=True, hide_index=True)
-    lines = ["digraph evidence {", '  graph [rankdir="LR"];', '  node [shape=box, style="rounded"];']
+        for item in source_records
+    ], width="stretch", hide_index=True)
+    lines = ["digraph evidence {", '  graph [rankdir="LR", nodesep="0.35", ranksep="0.55"];', '  node [shape=box, style="rounded,filled", fillcolor="#f1f7f3", color="#438263", fontname="Arial", fontsize=11];', '  edge [color="#438263", penwidth=1.7, label="Adjacent"];']
     node_names: dict[str, str] = {}
-    for index, (first, second) in enumerate(edges):
-        for record in (first, second):
-            if record["id"] not in node_names:
-                node_names[record["id"]] = f"node{len(node_names)}"
-                label = f"{record['file_type']}\\n{record['file_name']}\\nOffset {record['offset']:,} · {record['length']:,} bytes"
-                lines.append(f"  {node_names[record['id']]} [label={json.dumps(label)}];")
+    for record in source_records:
+        node_names[record["id"]] = f"node{len(node_names)}"
+        label = f"{record['file_type']}\\n{record['file_name']}\\nBytes {record['offset']:,}–{record['offset'] + record['length']:,}"
+        lines.append(f"  {node_names[record['id']]} [label={json.dumps(label)}];")
+    for first, second in edges:
         lines.append(f"  {node_names[first['id']]} -> {node_names[second['id']]} [label=\"Adjacent\"];")
     lines.append("}")
     st.graphviz_chart("\n".join(lines), width="stretch")
+    if not edges:
+        st.info("No exact adjacent ranges were found in this source. Candidates appear as unconnected nodes; no relationships were inferred.")
 
 
 pages = [
