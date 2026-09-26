@@ -3,7 +3,7 @@ import io
 from PIL import Image
 from pypdf import PdfWriter
 
-from backend.analyzer import analyze_bytes, verify_payload
+from backend.analyzer import analyze_bytes, repair_image_payload, verify_payload
 
 
 def test_detects_pdf_signature_and_end_marker():
@@ -55,3 +55,15 @@ def test_valid_jpeg_and_png_pass_container_verification():
         assert result["ending_valid"]
         assert result["container_valid"]
         assert result["verified"]
+
+
+def test_repair_salvages_truncated_jpeg_and_png_as_verified_copies():
+    for format_name, file_type, removed_bytes in (("JPEG", "JPEG", 2), ("PNG", "PNG", 12)):
+        buffer = io.BytesIO()
+        Image.new("RGB", (12, 8), "#287653").save(buffer, format=format_name)
+        damaged = buffer.getvalue()[:-removed_bytes]
+
+        repaired = repair_image_payload(file_type, damaged)
+
+        assert repaired != damaged
+        assert verify_payload(file_type, repaired)["verified"]

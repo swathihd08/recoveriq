@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import uuid
 from datetime import datetime, timezone
@@ -8,7 +9,7 @@ from typing import Any
 
 import streamlit as st
 
-from backend.analyzer import analyze_bytes, verify_payload
+from backend.analyzer import analyze_bytes, repair_image_payload, verify_payload
 from backend.store import Store
 from backend.workflow import pipeline_states
 
@@ -303,7 +304,7 @@ def compatibility_page() -> None:
 
 def integrity_page() -> None:
     records = assets()
-    render_page_intro("04 / RECONSTRUCT & VERIFY", "Integrity and recovery", "Join only confirmed contiguous ranges, validate structure, then export the stored result.")
+    render_page_intro("04 / RECONSTRUCT & VERIFY", "Integrity and recovery", "Stitch exact adjacent ranges, or attempt best-effort JPEG/PNG salvage when an image fails format checks.")
     item = selected_asset(records, "integrity_candidate")
     recovery_for_selected = store.get_recovery_for_asset(item["id"]) if item else None
     stage = 8 if recovery_for_selected and recovery_for_selected[0]["verified"] else 6
@@ -320,27 +321,57 @@ def integrity_page() -> None:
     st.caption(f"Source: {item['source']} · {item['file_type']} · offset {item['offset']:,} · {len(payload):,} bytes")
     existing_id = st.session_state.get("recovery_id")
     existing_source = st.session_state.get("recovery_source_id")
-    if st.button("Reconstruct and verify", type="primary", key="reconstruct_button"):
+    action_columns = st.columns(2) if item["file_type"] in {"JPEG", "PNG"} else [st]
+    reconstruct_clicked = action_columns[0].button(
+        "Reconstruct contiguous bytes",
+        type="primary",
+        key="reconstruct_button",
+    )
+    repair_clicked = (
+        action_columns[1].button("Attempt image repair", key="repair_image_button")
+        if item["file_type"] in {"JPEG", "PNG"}
+        else False
+    )
+    if reconstruct_clicked or repair_clicked:
         chain = compatible_chain(item)
         parts = [store.get_asset(part["id"])[1] for part in chain if store.get_asset(part["id"]) is not None]
-        recovered_bytes = b"".join(parts)
+        source_bytes = b"".join(parts)
+        operation = "image_repair" if repair_clicked else "byte_reconstruction"
+        if repair_clicked and verify_payload(item["file_type"], source_bytes)["verified"]:
+            st.info("This candidate already passes the image format checks. Re-encoding it is unlikely to repair any visible image damage, so no repair copy was created.")
+            return
+        try:
+            recovered_bytes = (
+                repair_image_payload(item["file_type"], source_bytes)
+                if repair_clicked
+                else source_bytes
+            )
+        except ValueError as error:
+            st.error(str(error))
+            return
         result = verify_payload(item["file_type"], recovered_bytes)
         extension = {"JPEG": ".jpg", "PNG": ".png", "PDF": ".pdf", "ZIP": ".zip", "TEXT": ".txt"}.get(item["file_type"], ".bin")
         base = item["file_name"].rsplit("_fragment_", 1)[0]
+        output_suffix = "_repaired" if repair_clicked else "_recovered"
         recovery_id = str(uuid.uuid4())
         recovery = {
             "id": recovery_id,
             "source_asset_id": item["id"],
-            "file_name": f"{base}_recovered{extension}",
+            "file_name": f"{base}{output_suffix}{extension}",
             "file_type": item["file_type"],
             "mime_type": item["mime_type"],
             "sha256": result["sha256"],
             "verified": result["verified"],
-            "validation": json.dumps(result),
+            "validation": json.dumps({
+                **result,
+                "operation": operation,
+                "input_sha256": hashlib.sha256(source_bytes).hexdigest(),
+            }),
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
         store.save_recovery(recovery, recovered_bytes)
-        store.update_status(item["id"], "Reconstructed" if result["verified"] else "Unverified reconstruction")
+        if not repair_clicked:
+            store.update_status(item["id"], "Reconstructed" if result["verified"] else "Unverified reconstruction")
         st.session_state.recovery_id = recovery_id
         st.session_state.recovery_source_id = item["id"]
         st.session_state.last_recovery_verified = result["verified"]
@@ -354,13 +385,19 @@ def integrity_page() -> None:
             validation = json.loads(recovered["validation"])
         except (KeyError, TypeError, json.JSONDecodeError):
             validation = verify_payload(item["file_type"], recovered_bytes)
+        if validation.get("operation") == "image_repair":
+            st.warning("This is a re-encoded salvage copy, not a restoration of missing pixels. The stored source candidate remains unchanged; metadata may be lost during re-encoding.")
+            hash_columns = st.columns(2)
+            hash_columns[0].caption(f"Input SHA-256: {validation.get('input_sha256', 'Unavailable')}")
+            hash_columns[1].caption(f"Repaired copy SHA-256: {recovered['sha256']}")
         st.subheader("Format-check results")
         st.json({key: validation[key] for key in ("signature_valid", "ending_valid", "container_valid", "size_valid", "verified", "bytes", "sha256")})
         if validation["verified"] and item["file_type"] in {"JPEG", "PNG"}:
             st.image(recovered_bytes, caption=recovered["file_name"], use_container_width=True)
-        st.download_button("Download reconstructed bytes", data=recovered_bytes, file_name=recovered["file_name"], mime="application/octet-stream", type="primary")
+        download_label = "Download repaired copy" if validation.get("operation") == "image_repair" else "Download reconstructed bytes"
+        st.download_button(download_label, data=recovered_bytes, file_name=recovered["file_name"], mime="application/octet-stream", type="primary")
     else:
-        st.info("Select the action to store a candidate artifact and run format checks.")
+        st.info("Choose byte reconstruction, or attempt JPEG/PNG salvage when an image fails format checks.")
     st.subheader("Source candidate facts")
     st.code(item["sha256"], language=None)
 

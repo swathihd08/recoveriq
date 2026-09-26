@@ -3,11 +3,14 @@ from __future__ import annotations
 import hashlib
 import io
 import re
+import threading
 import uuid
 import zipfile
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from typing import Any
+
+from PIL import Image, ImageFile
 
 SIGNATURES = (
     (b"%PDF-", "PDF", "application/pdf", "document"),
@@ -15,6 +18,7 @@ SIGNATURES = (
     (b"\x89PNG\r\n\x1a\n", "PNG", "image/png", "image"),
     (b"PK\x03\x04", "ZIP", "application/zip", "archive"),
 )
+_IMAGE_DECODE_LOCK = threading.RLock()
 
 
 @dataclass
@@ -153,11 +157,10 @@ def verify_payload(file_type: str, payload: bytes) -> dict[str, Any]:
     container_valid = False
     if signature_valid and ending_valid and file_type in {"JPEG", "PNG"}:
         try:
-            from PIL import Image
-
-            with Image.open(io.BytesIO(payload)) as image:
-                image.load()
-                container_valid = image.format == file_type
+            with _IMAGE_DECODE_LOCK:
+                with Image.open(io.BytesIO(payload)) as image:
+                    image.load()
+                    container_valid = image.format == file_type
         except Exception:
             container_valid = False
     elif signature_valid and ending_valid and file_type == "PDF":
@@ -185,6 +188,37 @@ def verify_payload(file_type: str, payload: bytes) -> dict[str, Any]:
         "sha256": hashlib.sha256(payload).hexdigest(),
         "bytes": len(payload),
     }
+
+
+def repair_image_payload(file_type: str, payload: bytes) -> bytes:
+    """Decode and re-encode a JPEG or PNG as a derived salvage copy."""
+    if file_type not in {"JPEG", "PNG"}:
+        raise ValueError("Image repair supports JPEG and PNG only.")
+    if not payload:
+        raise ValueError("There are no image bytes to repair.")
+
+    output = io.BytesIO()
+    with _IMAGE_DECODE_LOCK:
+        previous_setting = ImageFile.LOAD_TRUNCATED_IMAGES
+        try:
+            ImageFile.LOAD_TRUNCATED_IMAGES = True
+            with Image.open(io.BytesIO(payload)) as image:
+                if image.format != file_type:
+                    raise ValueError(f"Bytes do not decode as {file_type}.")
+                image.load()
+                repaired = image.copy()
+        except Exception as error:
+            raise ValueError(f"Pillow could not salvage this {file_type} image: {error}") from error
+        finally:
+            ImageFile.LOAD_TRUNCATED_IMAGES = previous_setting
+
+    if file_type == "JPEG" and repaired.mode not in {"L", "RGB", "CMYK"}:
+        repaired = repaired.convert("RGB")
+    try:
+        repaired.save(output, format=file_type)
+    except Exception as error:
+        raise ValueError(f"Decoded pixels could not be saved as {file_type}: {error}") from error
+    return output.getvalue()
 
 
 def serialize_candidate(candidate: Candidate) -> dict[str, Any]:

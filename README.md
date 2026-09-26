@@ -7,12 +7,14 @@ Streamlit-only, local-first evidence triage. The app reports observed file signa
 - **Evidence sources:** upload files and review source filenames present in SQLite.
 - **File candidates:** inspect detected signatures, offsets, carved lengths, statuses, and hashes.
 - **Compatibility:** report exact adjacent candidates only when a confirmed upload ID and file type match.
-- **Integrity and recovery:** rebuild contiguous candidate ranges, validate their format, store a reconstruction, and download it.
+- **Integrity and recovery:** rebuild contiguous candidate ranges, validate their format, store a reconstruction, and download it. JPEG/PNG candidates that fail format checks can also be decoded and re-encoded as a separate salvage copy.
 - **Byte relationships:** view a graph and table of exact adjacency links only.
 
 Previously scanned uploads can be removed from the Evidence sources page. Deletion requires confirmation and removes only records for that upload ID plus reconstructed artifacts linked to those candidate IDs; same-named uploads are kept separate. Original files on the user's device are not changed.
 
 JPEG, PNG, PDF, ZIP, and readable-text candidates are detected. JPEG/PNG decoding, strict PDF parsing, ZIP integrity checks, and text checks are used for format validation. Validation is not proof of forensic authenticity; missing bytes are never fabricated.
+
+Image salvage is best-effort: it can re-encode pixels that the decoder can still read, but cannot recreate missing or corrupted visual information. Re-encoding may discard metadata. It creates a derived copy and does not change the stored source candidate. Already-valid images are not re-encoded by the repair action.
 
 ## Run locally
 
